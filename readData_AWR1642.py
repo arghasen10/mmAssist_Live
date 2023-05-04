@@ -2,11 +2,12 @@
 import serial
 import time
 import numpy as np
-import pyqtgraph as pg
-from pyqtgraph.Qt import QtGui
+from operator import add
+# import pyqtgraph as pg
+# from pyqtgraph.Qt import QtGui
 
 # Change the configuration file name
-configFileName = '1642config.cfg'
+configFileName = 'tlv5.cfg'
 CLIport = {}
 Dataport = {}
 byteBuffer = np.zeros(2**15,dtype = 'uint8')
@@ -24,8 +25,8 @@ def serialConfig(configFileName):
     # Open the serial ports for the configuration and the data ports
     
     # Raspberry pi
-    CLIport = serial.Serial('/dev/ttyACM0', 115200)
-    Dataport = serial.Serial('/dev/ttyACM1', 921600)
+    CLIport = serial.Serial('COM4', 115200)
+    Dataport = serial.Serial('COM3', 921600)
     
     # Windows
     #CLIport = serial.Serial('COM3', 115200)
@@ -92,7 +93,168 @@ def parseConfigFile(configFileName):
     configParameters["maxVelocity"] = 3e8 / (4 * startFreq * 1e9 * (idleTime + rampEndTime) * 1e-6 * numTxAnt)
     
     return configParameters
-   
+
+
+def processPointCloud(byteBuffer, idX, configParameters):                
+    # word array to convert 4 bytes to a 16 bit number
+    word = [1, 2**8]
+    tlv_numObj = np.matmul(byteBuffer[idX:idX+2],word)
+    idX += 2
+    tlv_xyzQFormat = 2**np.matmul(byteBuffer[idX:idX+2],word)
+    idX += 2
+    
+    # Initialize the arrays
+    rangeIdx = np.zeros(tlv_numObj,dtype = 'int16')
+    dopplerIdx = np.zeros(tlv_numObj,dtype = 'int16')
+    peakVal = np.zeros(tlv_numObj,dtype = 'int16')
+    x = np.zeros(tlv_numObj,dtype = 'int16')
+    y = np.zeros(tlv_numObj,dtype = 'int16')
+    z = np.zeros(tlv_numObj,dtype = 'int16')
+    
+    for objectNum in range(tlv_numObj):
+        
+        # Read the data for each object
+        rangeIdx[objectNum] =  np.matmul(byteBuffer[idX:idX+2],word)
+        idX += 2
+        dopplerIdx[objectNum] = np.matmul(byteBuffer[idX:idX+2],word)
+        idX += 2
+        peakVal[objectNum] = np.matmul(byteBuffer[idX:idX+2],word)
+        idX += 2
+        x[objectNum] = np.matmul(byteBuffer[idX:idX+2],word)
+        idX += 2
+        y[objectNum] = np.matmul(byteBuffer[idX:idX+2],word)
+        idX += 2
+        z[objectNum] = np.matmul(byteBuffer[idX:idX+2],word)
+        idX += 2
+        
+    # Make the necessary corrections and calculate the rest of the data
+    rangeVal = rangeIdx * configParameters["rangeIdxToMeters"]
+    dopplerIdx[dopplerIdx > (configParameters["numDopplerBins"]/2 - 1)] = dopplerIdx[dopplerIdx > (configParameters["numDopplerBins"]/2 - 1)] - 65535
+    dopplerVal = dopplerIdx * configParameters["dopplerResolutionMps"]
+    #x[x > 32767] = x[x > 32767] - 65536
+    #y[y > 32767] = y[y > 32767] - 65536
+    #z[z > 32767] = z[z > 32767] - 65536
+    x = x / tlv_xyzQFormat
+    y = y / tlv_xyzQFormat
+    z = z / tlv_xyzQFormat
+    
+    # Store the data in the detObj dictionary
+    detObj = {"numObj": tlv_numObj, "rangeIdx": rangeIdx, "range": rangeVal, "dopplerIdx": dopplerIdx, \
+                "doppler": dopplerVal, "peakVal": peakVal, "x": x, "y": y, "z": z}
+    
+    dataOK = 1
+    return detObj, dataOk
+def func23(byteBuffer, idX, configParameters, isRangeProfile, detObj):
+    traceidX = 0
+    if isRangeProfile:
+        traceidX = 0
+    else:
+        traceidX = 2
+    numrp = 2 * configParameters["numRangeBins"]
+    rp = byteBuffer[idX : idX + numrp]
+
+    rp = list(map(add, rp[0:numrp:2], list(map(lambda x: 256 * x, rp[1:numrp:2]))))
+    rp_x = (
+        np.array(range(configParameters["numRangeBins"]))
+        * configParameters["rangeIdxToMeters"]
+    )
+    idX += numrp
+    if traceidX == 0:
+        noiseObj = {"rp": rp}
+        return noiseObj
+    elif traceidX == 2:
+        noiseObj = {"noiserp": rp}
+        return noiseObj
+def func5(idX, byteBuffer, configParameters):
+    numBytes = (
+        int(configParameters["numDopplerBins"])
+        * int(configParameters["numRangeBins"])
+        * 2
+    )
+    # Convert the raw data to int16 array
+    payload = byteBuffer[idX : idX + numBytes]
+    idX += numBytes
+    # rangeDoppler = math.add(
+    #     math.subset(rangeDoppler, math.index(math.range(0, numBytes, 2))),
+    #     math.multiply(math.subset(rangeDoppler, math.index(math.range(1, numBytes, 2))), 256)
+    # );
+
+    rangeDoppler = list(
+        map(
+            add,
+            payload[0:numBytes:2],
+            list(map(lambda x: 256 * x, payload[1:numBytes:2])),
+        )
+    )  # wrong implementation. Need to update the range doppler at range index
+
+    # rangeDoppler = payload.view(dtype=np.int16)
+    # Some frames have strange values, skip those frames
+    # TO DO: Find why those strange frames happen
+    # if np.max(rangeDoppler) > 10000:
+    #     return 0
+
+    # Convert the range doppler array to a matrix
+    rangeDoppler = np.reshape(
+        rangeDoppler,
+        (int(configParameters["numDopplerBins"]), configParameters["numRangeBins"]),
+        "F",
+    )  # Fortran-like reshape
+    rangeDoppler = np.append(
+        rangeDoppler[int(len(rangeDoppler) / 2) :],
+        rangeDoppler[: int(len(rangeDoppler) / 2)],
+        axis=0,
+    )
+
+    dopplerM = []
+    rangeDoppler_list = list(rangeDoppler)
+    for e in rangeDoppler_list:
+        dopplerM.append(list(e))
+
+    #
+    # # Generate the range and doppler arrays for the plot
+    rangeArray = (
+        np.array(range(configParameters["numRangeBins"]))
+        * configParameters["rangeIdxToMeters"]
+    )
+    dopplerArray = np.multiply(
+        np.arange(
+            -configParameters["numDopplerBins"] / 2,
+            configParameters["numDopplerBins"] / 2,
+        ),
+        configParameters["dopplerResolutionMps"],
+    )  # This is dopplermps from js.
+    dopplerObj = {
+        "rangeDoppler": dopplerM,
+        "rangeArray": list(rangeArray),
+        "dopplerArray": list(dopplerArray),
+    }
+    return dopplerObj
+def func6(byteBuffer, idX, configParameters):
+    word = [1, 2**8, 2**16, 2**24]
+    interFrameProcessingTime = np.matmul(byteBuffer[idX : idX + 4], word)
+    idX += 4
+    transmitOutputTime = np.matmul(byteBuffer[idX : idX + 4], word)
+    idX += 4
+    interFrameProcessingMargin = np.matmul(byteBuffer[idX : idX + 4], word)
+    idX += 4
+    interChirpProcessingMargin = np.matmul(byteBuffer[idX : idX + 4], word)
+    idX += 4
+    activeFrameCPULoad = np.matmul(byteBuffer[idX : idX + 4], word)
+    idX += 4
+
+    interFrameCPULoad = np.matmul(byteBuffer[idX : idX + 4], word)
+    idX += 4
+
+    statisticsObj = {
+        "interFrameProcessingTime": interFrameProcessingTime,
+        "transmitOutputTime": transmitOutputTime,
+        "interFrameProcessingMargin": interFrameProcessingMargin,
+        "interChirpProcessingMargin": interChirpProcessingMargin,
+        "activeFrameCPULoad": activeFrameCPULoad,
+        "interFrameCPULoad": interFrameCPULoad,
+    }
+    return statisticsObj
+
 # ------------------------------------------------------------------
 
 # Funtion to read and parse the incoming data
@@ -196,63 +358,35 @@ def readAndParseData16xx(Dataport, configParameters):
             # Check the header of the TLV message
             try:
                 tlv_type = np.matmul(byteBuffer[idX:idX+4],word)
+                
                 idX += 4
                 tlv_length = np.matmul(byteBuffer[idX:idX+4],word)
+                print(tlv_type,tlv_length, idX)
+                
                 idX += 4
+                if tlv_type == 1:
+                    detObj, dataOK = processPointCloud(byteBuffer, idX, configParameters)
+                    print(detObj)
+                elif tlv_type == 2:
+                    detObj = func23(byteBuffer, idX, configParameters, True, detObj)
+                    print(detObj)
+                elif tlv_type == 3:
+                    detObj = func23(byteBuffer, idX, configParameters, False, detObj)
+                    print(detObj)
+                elif tlv_type == 5:
+                    detObj = func5(idX, byteBuffer, configParameters)
+                    print(detObj)
+                elif tlv_type == 6:
+                    detObj = func6(byteBuffer, idX, configParameters)
+                    print(detObj)
+                idX+=tlv_length
             except:
+                # print("enterng in the ecep")
                 pass
             
             # Read the data depending on the TLV message
-            if tlv_type == MMWDEMO_UART_MSG_DETECTED_POINTS:
-                            
-                # word array to convert 4 bytes to a 16 bit number
-                word = [1, 2**8]
-                tlv_numObj = np.matmul(byteBuffer[idX:idX+2],word)
-                idX += 2
-                tlv_xyzQFormat = 2**np.matmul(byteBuffer[idX:idX+2],word)
-                idX += 2
-                
-                # Initialize the arrays
-                rangeIdx = np.zeros(tlv_numObj,dtype = 'int16')
-                dopplerIdx = np.zeros(tlv_numObj,dtype = 'int16')
-                peakVal = np.zeros(tlv_numObj,dtype = 'int16')
-                x = np.zeros(tlv_numObj,dtype = 'int16')
-                y = np.zeros(tlv_numObj,dtype = 'int16')
-                z = np.zeros(tlv_numObj,dtype = 'int16')
-                
-                for objectNum in range(tlv_numObj):
-                    
-                    # Read the data for each object
-                    rangeIdx[objectNum] =  np.matmul(byteBuffer[idX:idX+2],word)
-                    idX += 2
-                    dopplerIdx[objectNum] = np.matmul(byteBuffer[idX:idX+2],word)
-                    idX += 2
-                    peakVal[objectNum] = np.matmul(byteBuffer[idX:idX+2],word)
-                    idX += 2
-                    x[objectNum] = np.matmul(byteBuffer[idX:idX+2],word)
-                    idX += 2
-                    y[objectNum] = np.matmul(byteBuffer[idX:idX+2],word)
-                    idX += 2
-                    z[objectNum] = np.matmul(byteBuffer[idX:idX+2],word)
-                    idX += 2
-                    
-                # Make the necessary corrections and calculate the rest of the data
-                rangeVal = rangeIdx * configParameters["rangeIdxToMeters"]
-                dopplerIdx[dopplerIdx > (configParameters["numDopplerBins"]/2 - 1)] = dopplerIdx[dopplerIdx > (configParameters["numDopplerBins"]/2 - 1)] - 65535
-                dopplerVal = dopplerIdx * configParameters["dopplerResolutionMps"]
-                #x[x > 32767] = x[x > 32767] - 65536
-                #y[y > 32767] = y[y > 32767] - 65536
-                #z[z > 32767] = z[z > 32767] - 65536
-                x = x / tlv_xyzQFormat
-                y = y / tlv_xyzQFormat
-                z = z / tlv_xyzQFormat
-                
-                # Store the data in the detObj dictionary
-                detObj = {"numObj": tlv_numObj, "rangeIdx": rangeIdx, "range": rangeVal, "dopplerIdx": dopplerIdx, \
-                          "doppler": dopplerVal, "peakVal": peakVal, "x": x, "y": y, "z": z}
-                
-                dataOK = 1
-       
+
+            
         
         # Remove already processed data
         if idX > 0 and byteBufferLength > idX:
@@ -287,8 +421,8 @@ def update():
         x = -detObj["x"]
         y = detObj["y"]
         
-        s.setData(x,y)
-        QtGui.QApplication.processEvents()
+        # s.setData(x,y)
+        # QtGui.QApplication.processEvents()
     
     return dataOk
 
@@ -302,18 +436,18 @@ CLIport, Dataport = serialConfig(configFileName)
 configParameters = parseConfigFile(configFileName)
 
 # START QtAPPfor the plot
-app = QtGui.QApplication([])
+# app = QtGui.QApplication([])
 
-# Set the plot 
-pg.setConfigOption('background','w')
-win = pg.GraphicsLayoutWidget(title="2D scatter plot")
-p = win.addPlot()
-p.setXRange(-0.5,0.5)
-p.setYRange(0,1.5)
-p.setLabel('left',text = 'Y position (m)')
-p.setLabel('bottom', text= 'X position (m)')
-s = p.plot([],[],pen=None,symbol='o')
-win.show()
+# # Set the plot 
+# pg.setConfigOption('background','w')
+# win = pg.GraphicsLayoutWidget(title="2D scatter plot")
+# p = win.addPlot()
+# p.setXRange(-0.5,0.5)
+# p.setYRange(0,1.5)
+# p.setLabel('left',text = 'Y position (m)')
+# p.setLabel('bottom', text= 'X position (m)')
+# s = p.plot([],[],pen=None,symbol='o')
+# win.show()
     
    
 # Main loop 
@@ -337,7 +471,7 @@ while True:
         CLIport.write(('sensorStop\n').encode())
         CLIport.close()
         Dataport.close()
-        win.close()
+        # win.close()
         break
         
     
