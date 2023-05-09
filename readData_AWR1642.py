@@ -5,7 +5,9 @@ import numpy as np
 from operator import add
 # import pyqtgraph as pg
 # from pyqtgraph.Qt import QtGui
-
+import csv
+import datetime
+from datetime import date
 # Change the configuration file name
 configFileName = 'tlv5.cfg'
 CLIport = {}
@@ -256,11 +258,15 @@ def func6(byteBuffer, idX, configParameters):
     return statisticsObj
 
 # ------------------------------------------------------------------
-
+framenumber = 0
 # Funtion to read and parse the incoming data
-def readAndParseData16xx(Dataport, configParameters):
+def readAndParseData16xx(Dataport, configParameters,filename):
     global byteBuffer, byteBufferLength
-
+    dte = date.today()
+    time = datetime.datetime.now().time()
+    list = []
+    list.append(dte)
+    list.append(time)
     # Constants
     OBJ_STRUCT_SIZE_BYTES = 12;
     BYTE_VEC_ACC_MAX_SIZE = 2**15;
@@ -339,6 +345,7 @@ def readAndParseData16xx(Dataport, configParameters):
         platform = format(np.matmul(byteBuffer[idX:idX+4],word),'x')
         idX += 4
         frameNumber = np.matmul(byteBuffer[idX:idX+4],word)
+        list.append(frameNumber)
         idX += 4
         timeCpuCycles = np.matmul(byteBuffer[idX:idX+4],word)
         idX += 4
@@ -350,6 +357,8 @@ def readAndParseData16xx(Dataport, configParameters):
         idX += 4
         
         # Read the TLV messages
+        
+
         for tlvIdx in range(numTLVs):
             
             # word array to convert 4 bytes to a 32 bit number
@@ -366,28 +375,43 @@ def readAndParseData16xx(Dataport, configParameters):
                 idX += 4
                 if tlv_type == 1:
                     detObj, dataOK = processPointCloud(byteBuffer, idX, configParameters)
+                    list.append(detObj['numObj'])
+                    list.append(detObj['rangeIdx'])
+                    list.append(detObj['range'])
+                    list.append(detObj['dopplerIdx'])
+                    list.append(detObj['doppler'])
+                    list.append(detObj['peakVal'])
+                    list.append(detObj['x'])
+                    list.append(detObj['y'])
+                    list.append(detObj['z'])
+
                     print(detObj)
                 elif tlv_type == 2:
                     detObj = func23(byteBuffer, idX, configParameters, True, detObj)
+                    list.append(detObj['rp'])
                     print(detObj)
                 elif tlv_type == 3:
                     detObj = func23(byteBuffer, idX, configParameters, False, detObj)
+                    list.append(detObj['noiserp'])
                     print(detObj)
                 elif tlv_type == 5:
                     detObj = func5(idX, byteBuffer, configParameters)
+                    list.append(detObj['rangeDoppler'])
                     print(detObj)
                 elif tlv_type == 6:
                     detObj = func6(byteBuffer, idX, configParameters)
                     print(detObj)
-                idX+=tlv_length
+                idX += tlv_length
             except:
-                # print("enterng in the ecep")
+                print("enterng in the ecep")
                 pass
             
             # Read the data depending on the TLV message
 
-            
+        # writer.writerow[
         
+        writer = csv.writer(file)
+        writer.writerow(list)
         # Remove already processed data
         if idX > 0 and byteBufferLength > idX:
             shiftSize = totalPacketLen
@@ -406,7 +430,7 @@ def readAndParseData16xx(Dataport, configParameters):
 # ------------------------------------------------------------------
 
 # Funtion to update the data and display in the plot
-def update():
+def update(filename):
      
     dataOk = 0
     global detObj
@@ -414,7 +438,7 @@ def update():
     y = []
       
     # Read and parse the received data
-    dataOk, frameNumber, detObj = readAndParseData16xx(Dataport, configParameters)
+    dataOk, frameNumber, detObj = readAndParseData16xx(Dataport, configParameters,filename)
     
     if dataOk and len(detObj["x"])>0:
         #print(detObj)
@@ -434,6 +458,9 @@ CLIport, Dataport = serialConfig(configFileName)
 
 # Get the configuration parameters from the configuration file
 configParameters = parseConfigFile(configFileName)
+file = open("data.csv", 'w', newline='')
+writer = csv.writer(file)
+writer.writerow([ "date", "time", "frame_no", "numObj", "rangeIdx", "range", "dopplerIdx", "doppler", "peakVal", "x","y", "z", "range_profile", "noise_profile", "range_doppler"])
 
 # START QtAPPfor the plot
 # app = QtGui.QApplication([])
@@ -457,7 +484,7 @@ currentIndex = 0
 while True:
     try:
         # Update the data and check if the data is okay
-        dataOk = update()
+        dataOk = update(file)
         
         if dataOk:
             # Store the current frame into frameData
